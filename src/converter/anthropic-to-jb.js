@@ -1,4 +1,4 @@
-const { anthropicToolsToJB, buildCommonParams, buildToolChoiceHint, buildParametersData } = require('./tools');
+const { anthropicToolsToJB, buildParametersData } = require('./tools');
 
 const THINKING_SYSTEM = `Before answering, think step by step inside <thinking>...</thinking> tags.
 
@@ -41,32 +41,9 @@ function convertRequest(anthropicBody, resolved = {}) {
     else systemForJB = sys;
   }
 
-  // tool_choice 处理：JB 没有原生 tool_choice，通过注入 system 提示实现
-  const { hint: toolChoiceHint } = buildToolChoiceHint(anthropicBody.tool_choice, anthropicBody.tools);
-  if (toolChoiceHint) {
-    if (typeof systemForJB === 'string') {
-      systemForJB = systemForJB + '\n\n' + toolChoiceHint;
-    } else if (Array.isArray(systemForJB)) {
-      systemForJB = [...systemForJB, { type: 'text', text: toolChoiceHint }];
-    } else {
-      systemForJB = toolChoiceHint;
-    }
-  }
-
   const messages = convertMessages(systemForJB, anthropicBody.messages || []);
   const toolsData = anthropicToolsToJB(anthropicBody.tools);
 
-  // 通用参数：temperature, top_p, max_tokens, stop
-  const hasTools = toolsData.length > 0;
-  const commonParams = buildCommonParams({
-    temperature: anthropicBody.temperature,
-    top_p: anthropicBody.top_p,
-    max_tokens: anthropicBody.max_tokens,
-    stop: anthropicBody.stop_sequences,
-    hasTools,
-  });
-
-  // 原生参数：reasoning-effort / thinking-budget
   const extraParams = [];
   if (resolved.mode === 'native_reasoning_effort' && resolved.level) {
     extraParams.push(
@@ -81,7 +58,8 @@ function convertRequest(anthropicBody, resolved = {}) {
     );
   }
 
-  const allParams = buildParametersData(toolsData, commonParams, extraParams);
+  const parametersData = buildParametersData(toolsData);
+  const allParams = [...parametersData, ...extraParams];
 
   return {
     prompt: 'ij.chat.request.new-chat-on-start',

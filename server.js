@@ -25,11 +25,8 @@ function cleanBody(obj) {
   if (obj && typeof obj === 'object') {
     const clean = {};
     for (const [k, v] of Object.entries(obj)) {
-      // Only strip undefined and literal '[undefined]' strings.
-      // Do NOT strip null — OpenAI format requires content:null on assistant
-      // messages with tool_calls, and other fields legitimately use null.
-      if (v === undefined || v === '[undefined]') continue;
-      clean[k] = (v !== null && typeof v === 'object') ? cleanBody(v) : v;
+      if (v === undefined || v === null || v === '[undefined]') continue;
+      clean[k] = typeof v === 'object' ? cleanBody(v) : v;
     }
     return clean;
   }

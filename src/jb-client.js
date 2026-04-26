@@ -98,11 +98,16 @@ async function getQuota(jwt, workerUrl) {
   return res.json();
 }
 
-function chatStream(jwt, body) {
+// 流式 chat：可传入外部 AbortSignal（来自 Cursor 客户端 res.close 事件）
+// 这样客户端断开时反代立即取消上游请求，避免空跑浪费 token
+function chatStream(jwt, body, externalSignal) {
   const config = loadConfig();
-  // Abort after 5 minutes of no response (covers connect + first-byte + thinking time)
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 300000);
+  // 组合两个超时：连接超时 60s + 整体超时 10min（JB 偶尔需要长思考）
+  // 如果外部传了 signal（客户端断开），合并它
+  const signals = [AbortSignal.timeout(10 * 60 * 1000)];
+  if (externalSignal) signals.push(externalSignal);
+  const signal = AbortSignal.any ? AbortSignal.any(signals) : signals[0];
+
   return fetch(`${JB_API_BASE}/user/v5/llm/chat/stream/v8`, {
     method: 'POST',
     headers: {
@@ -115,8 +120,10 @@ function chatStream(jwt, body) {
       'User-Agent': 'ktor-client',
     },
     body: JSON.stringify(body),
-    signal: controller.signal,
-  }).finally(() => clearTimeout(timeout));
+    signal,
+    // 让 undici 不要因为 idle 提前关连接（流式请求中间可能 30s+ 没数据）
+    keepalive: false,
+  });
 }
 
 function decodeJwtPayload(token) {

@@ -34,60 +34,92 @@ router.post('/v1/chat/completions', async (req, res) => {
   });
   console.log(`\n[DEBUG /v1/chat/completions] model=${req.body.model} -> profile=${resolved.profile} mode=${resolved.mode}${resolved.level ? '/' + resolved.level : ''} stream=${req.body.stream} messages=${(req.body.messages||[]).length}\n${_dbgMsgs.join('\n')}`);
 
+  // 客户端断开时取消上游 fetch（避免空跑浪费 token）
+  const clientAbort = new AbortController();
+  const onClientClose = () => { clientAbort.abort('client closed'); };
+  res.once('close', onClientClose);
+
   const MAX_RETRIES = 3;
   const excludeIds = [];
+  // 上游 terminated 错误也算一次失败，但只重试 1 次（避免风暴）
+  let terminatedRetried = false;
+  // 当前 attempt 用的账号（catch 里要拿来加 excludeIds）
+  let currentAccount = null;
 
-  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
-    try {
-      const account = accountManager.getNext(excludeIds);
-      if (!account) {
-        return res.status(503).json({ error: { message: 'No active accounts', type: 'server_error' } });
-      }
-
-      const jwt = await accountManager.ensureValidJwt(account);
-      const jbBody = convertRequest(req.body, resolved);
-      const jbRes = await jb.chatStream(jwt, jbBody);
-
-      if (!jbRes.ok) {
-        const errText = await jbRes.text();
-
-        if (jbRes.status === 477) {
-          const switched = await accountManager.markQuotaExhausted(account);
-          if (!switched) excludeIds.push(account.id);
-          console.log(`[477] ${account.email}: ${switched ? 'switched license' : 'exhausted'}, retry ${attempt + 1}/${MAX_RETRIES}`);
-          continue;
+  try {
+    for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+      try {
+        // 客户端已断开就直接退出，不要再调上游
+        if (clientAbort.signal.aborted) {
+          console.log('[chat] client aborted before request, skip');
+          return;
         }
 
-        const status = jbRes.status;
-        return res.status(status).json({ error: { message: errText, type: 'api_error' } });
-      }
+        const account = accountManager.getNext(excludeIds);
+        currentAccount = account;
+        if (!account) {
+          if (!res.headersSent) res.status(503).json({ error: { message: 'No active accounts', type: 'server_error' } });
+          return;
+        }
 
-      const isStream = req.body.stream !== false;
-      // 计算 prompt 总字符数用于 usage token 估算
-      const promptCharCount = (req.body.messages || []).reduce((sum, m) => {
-        const c = m.content;
-        if (typeof c === 'string') return sum + c.length;
-        if (Array.isArray(c)) return sum + c.reduce((s, p) => s + (p.text || '').length, 0);
-        return sum;
-      }, 0);
-      // 把 prompt 注入模式下的 thinking 拆分标记传给流转换器
-      // 原始 model 名作为响应里的 model 字段（保持 Cursor 看到选了什么就回什么）
-      await convertStreamToOpenAI(jbRes.body, res, req.body.model, isStream, {
-        promptInject: resolved.mode === 'prompt_inject',
-        promptCharCount,
-      });
-      return;
-    } catch (err) {
-      console.error('POST /v1/chat/completions error:', err.message);
-      if (!res.headersSent) {
-        res.status(500).json({ error: { message: err.message, type: 'server_error' } });
+        const jwt = await accountManager.ensureValidJwt(account);
+        const jbBody = convertRequest(req.body, resolved);
+        const jbRes = await jb.chatStream(jwt, jbBody, clientAbort.signal);
+
+        if (!jbRes.ok) {
+          const errText = await jbRes.text();
+
+          if (jbRes.status === 477) {
+            const switched = await accountManager.markQuotaExhausted(account);
+            if (!switched) excludeIds.push(account.id);
+            console.log(`[477] ${account.email}: ${switched ? 'switched license' : 'exhausted'}, retry ${attempt + 1}/${MAX_RETRIES}`);
+            continue;
+          }
+
+          const status = jbRes.status;
+          if (!res.headersSent) res.status(status).json({ error: { message: errText, type: 'api_error' } });
+          return;
+        }
+
+        const isStream = req.body.stream !== false;
+        await convertStreamToOpenAI(jbRes.body, res, req.body.model, isStream, {
+          promptInject: resolved.mode === 'prompt_inject',
+        });
+        return;
+      } catch (err) {
+        // 客户端主动断开 / signal abort：不算上游错误，安静退出
+        if (clientAbort.signal.aborted || /aborted|AbortError/i.test(err.name || err.message)) {
+          console.log('[chat] aborted by client');
+          return;
+        }
+        // 上游 terminated（梯子断线 / JB 心跳断）：换一个账号重试一次
+        // 关键：把当前账号加 excludeIds，避免下一轮又抽到同一个（同节点同样会 terminated）
+        if (/terminated|UND_ERR|ECONNRESET|ETIMEDOUT|fetch failed/i.test(err.message) && !terminatedRetried) {
+          terminatedRetried = true;
+          if (currentAccount) excludeIds.push(currentAccount.id);
+          console.warn(`[chat] upstream terminated on ${currentAccount?.email || '?'}, retry with another account: ${err.message}`);
+          continue;
+        }
+        console.error('POST /v1/chat/completions error:', err.message);
+        if (!res.headersSent) {
+          res.status(502).json({ error: { message: 'Upstream error: ' + err.message, type: 'upstream_error' } });
+        } else if (!res.writableEnded && !clientAbort.signal.aborted) {
+          // 已经开始流式了 + 客户端没断开 → 发个错误事件再结束
+          try {
+            res.write(`data: ${JSON.stringify({ error: { message: err.message, type: 'upstream_error' } })}\n\n`);
+            res.write('data: [DONE]\n\n');
+            res.end();
+          } catch {}
+        }
+        return;
       }
-      return;
     }
-  }
 
-  if (!res.headersSent) {
-    res.status(429).json({ error: { message: 'All accounts quota exhausted', type: 'rate_limit_error' } });
+    if (!res.headersSent) {
+      res.status(429).json({ error: { message: 'All accounts quota exhausted', type: 'rate_limit_error' } });
+    }
+  } finally {
+    res.removeListener('close', onClientClose);
   }
 });
 

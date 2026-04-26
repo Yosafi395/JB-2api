@@ -1,4 +1,4 @@
-const { openaiToolsToJB, buildCommonParams, buildToolChoiceHint, buildParametersData } = require('./tools');
+const { openaiToolsToJB, buildParametersData } = require('./tools');
 
 // ── prompt 注入：写代码场景优化的 thinking 提示 ──
 // 设计依据：Anthropic 官方 prompt-engineering 指南 + rokwuky 实测验证
@@ -55,39 +55,10 @@ function convertRequest(openaiBody, resolved = {}) {
     }
   }
 
-  // 2) tool_choice 处理：JB 没有原生 tool_choice，通过注入 system 提示实现
-  const { hint: toolChoiceHint } = buildToolChoiceHint(openaiBody.tool_choice, openaiBody.tools);
-  if (toolChoiceHint) {
-    // 把 tool_choice 指令追加到最后一个 system message，或新建一个
-    const sysIdx = messages.map((m, i) => m.role === 'system' || m.role === 'developer' ? i : -1).filter(i => i >= 0);
-    if (sysIdx.length > 0) {
-      const lastSysIdx = sysIdx[sysIdx.length - 1];
-      const orig = messages[lastSysIdx];
-      const origText = typeof orig.content === 'string' ? orig.content : (Array.isArray(orig.content) ? orig.content.filter(c => c.type === 'text').map(c => c.text).join('\n') : '');
-      messages = [
-        ...messages.slice(0, lastSysIdx),
-        { role: 'system', content: origText + '\n\n' + toolChoiceHint },
-        ...messages.slice(lastSysIdx + 1),
-      ];
-    } else {
-      messages = [{ role: 'system', content: toolChoiceHint }, ...messages];
-    }
-  }
-
   const jbMessages = convertMessages(messages);
   const toolsData = openaiToolsToJB(openaiBody.tools);
 
-  // 3) 通用参数：temperature, top_p, max_tokens, stop
-  const hasTools = toolsData.length > 0;
-  const commonParams = buildCommonParams({
-    temperature: openaiBody.temperature,
-    top_p: openaiBody.top_p,
-    max_tokens: openaiBody.max_tokens ?? openaiBody.max_completion_tokens,
-    stop: openaiBody.stop,
-    hasTools,
-  });
-
-  // 4) 原生参数：reasoning-effort / thinking-budget
+  // 2) 原生参数：reasoning-effort / thinking-budget
   const extraParams = [];
   if (resolved.mode === 'native_reasoning_effort' && resolved.level) {
     extraParams.push(
@@ -103,7 +74,8 @@ function convertRequest(openaiBody, resolved = {}) {
     );
   }
 
-  const allParams = buildParametersData(toolsData, commonParams, extraParams);
+  const parametersData = buildParametersData(toolsData);
+  const allParams = [...parametersData, ...extraParams];
 
   return {
     prompt: 'ij.chat.request.new-chat-on-start',
