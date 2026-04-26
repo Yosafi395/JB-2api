@@ -4,6 +4,24 @@
 
 ---
 
+## 2026-04-26T22:06 — 修复流 "terminated" 错误导致未完成 SSE
+
+### 修改文件
+- `src/converter/jb-to-openai.js` — for-await 循环包裹 try-catch
+- `src/converter/jb-to-anthropic.js` — for-await 循环包裹 try-catch
+
+### 关键改动
+1. 上游连接中断（TypeError: terminated）不再冒泡到路由 catch
+2. 中断后 fallthrough 到已有的 `!receivedFinish` 处理：发送 finish_reason=length 并正常关闭 SSE（[DONE] / message_stop）
+3. 客户端不再收到不完整的 SSE 流
+
+### 验证
+- `node -c` 语法检查通过
+- `require()` 模块加载通过
+- Git commit 6b7096e
+
+---
+
 ## 2026-04-26 — 全面修复工具调用兼容性
 
 ### 修改文件

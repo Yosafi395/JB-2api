@@ -36,3 +36,8 @@
 - SESSION_STATE.md：当前任务状态
 - DECISIONS.md：项目约束和设计决策（只追加）
 - CHANGELOG_AGENT.md：变更记录（时间倒序）
+
+### D007 — 流读取异常在 converter 内部捕获
+- 日期：2026-04-26
+- 原因：for-await 遍历 jbStream 时上游关闭连接会抛 TypeError: terminated，若冒泡到路由 catch，已发送 headers 的流无法回退为 JSON 错误
+- 方案：在 convertStreamToOpenAI / convertStreamToAnthropic 的 for-await 外包 try-catch，捕获后 fallthrough 到 !receivedFinish 逻辑，正常关闭 SSE

@@ -16,6 +16,7 @@
 - [x] usage token 估算（不再始终返回 0）
 - [x] chatStream fetch 添加 5 分钟超时
 - [x] 项目推送到 GitHub（Yosafi395/JB-Shu，私有）
+- [x] 流 "terminated" 错误捕获（for-await 循环 try-catch 包裹，防止未完成 SSE）
 
 ## NextStep
 部署后实际测试 Kilo Code 的 write 工具是否能正常完成写入。如果仍有截断，需检查 JB API 是否对 `llm.parameters.length` 有上限限制，以及是否需要更大的默认值。
@@ -23,7 +24,7 @@
 ## Verification
 - 所有修改文件通过 `node -c` 语法检查
 - 所有模块通过 `require()` 加载验证
-- 已推送至 GitHub
+- 已提交至 Git（6b7096e）
 
 ## LastUpdated
-2026-04-26T21:58+08:00
+2026-04-26T22:06+08:00
