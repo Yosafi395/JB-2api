@@ -43,120 +43,126 @@ async function convertStreamToOpenAI(jbStream, res, model, stream = true, option
   const decoder = new TextDecoder();
   let leftover = '';
 
-  for await (const chunk of jbStream) {
-    const text = leftover + decoder.decode(chunk, { stream: true });
-    const lines = text.split('\n');
-    leftover = lines.pop() || '';
+  try {
+    for await (const chunk of jbStream) {
+      const text = leftover + decoder.decode(chunk, { stream: true });
+      const lines = text.split('\n');
+      leftover = lines.pop() || '';
 
-    for (const line of lines) {
-      if (!line.startsWith('data: ')) continue;
-      const dataStr = line.slice(6).trim();
-      if (dataStr === 'end' || dataStr === '') continue;
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const dataStr = line.slice(6).trim();
+        if (dataStr === 'end' || dataStr === '') continue;
 
-      let event;
-      try { event = JSON.parse(dataStr); } catch { continue; }
+        let event;
+        try { event = JSON.parse(dataStr); } catch { continue; }
 
-      if (event.type === 'Content') {
-        const raw = event.content || '';
-        completionChars += raw.length;
-        if (promptInject) {
-          // 流式拆分
-          const parts = splitThinking(raw, thinkingState);
-          for (const part of parts) {
-            if (part.kind === 'thinking' && part.text) {
-              if (stream) {
-                res.write(`data: ${JSON.stringify(makeChunk(id, created, model, { reasoning_content: part.text }))}\n\n`);
-              } else {
-                buffer.reasoning += part.text;
-              }
-            } else if (part.kind === 'content' && part.text) {
-              if (stream) {
-                res.write(`data: ${JSON.stringify(makeChunk(id, created, model, { content: part.text }))}\n\n`);
-              } else {
-                buffer.content += part.text;
+        if (event.type === 'Content') {
+          const raw = event.content || '';
+          completionChars += raw.length;
+          if (promptInject) {
+            // 流式拆分
+            const parts = splitThinking(raw, thinkingState);
+            for (const part of parts) {
+              if (part.kind === 'thinking' && part.text) {
+                if (stream) {
+                  res.write(`data: ${JSON.stringify(makeChunk(id, created, model, { reasoning_content: part.text }))}\n\n`);
+                } else {
+                  buffer.reasoning += part.text;
+                }
+              } else if (part.kind === 'content' && part.text) {
+                if (stream) {
+                  res.write(`data: ${JSON.stringify(makeChunk(id, created, model, { content: part.text }))}\n\n`);
+                } else {
+                  buffer.content += part.text;
+                }
               }
             }
-          }
-        } else {
-          if (stream) {
-            res.write(`data: ${JSON.stringify(makeChunk(id, created, model, { content: raw }))}\n\n`);
           } else {
-            buffer.content += raw;
-          }
-        }
-      } else if (event.type === 'ToolCall') {
-        const idx = event.parallelToolIndex || 0;
-        if (event.id && event.name) {
-          activeToolCalls.set(idx, { id: event.id, name: event.name, arguments: '' });
-          if (stream) {
-            res.write(`data: ${JSON.stringify(makeChunk(id, created, model, {
-              tool_calls: [{ index: idx, id: event.id, type: 'function', function: { name: event.name, arguments: '' } }],
-            }))}\n\n`);
-          }
-        } else if (event.content) {
-          const tc = activeToolCalls.get(idx);
-          if (tc) tc.arguments += event.content;
-          completionChars += (event.content || '').length;
-          if (stream) {
-            res.write(`data: ${JSON.stringify(makeChunk(id, created, model, {
-              tool_calls: [{ index: idx, function: { arguments: event.content } }],
-            }))}\n\n`);
-          }
-        }
-      } else if (event.type === 'FinishMetadata') {
-        receivedFinish = true;
-        // Map JB finish reasons to OpenAI:
-        //   tool_call → tool_calls (model wants to call a tool)
-        //   length    → length    (output truncated due to max_tokens)
-        //   stop      → stop      (normal completion)
-        const finishReason = event.reason === 'tool_call' ? 'tool_calls'
-          : event.reason === 'length' ? 'length'
-          : 'stop';
-        if (finishReason === 'length') {
-          console.warn(`[WARN] Response truncated (finish_reason=length). Model=${model}. Consider increasing max_tokens.`);
-        }
-        // 末尾把 pending 的残留文本作为 content 输出（避免吞最后一个标签前的几个字符）
-        if (promptInject && thinkingState.pending) {
-          const tail = thinkingState.pending;
-          thinkingState.pending = '';
-          if (tail) {
-            completionChars += tail.length;
             if (stream) {
-              const key = thinkingState.inThinking ? 'reasoning_content' : 'content';
-              res.write(`data: ${JSON.stringify(makeChunk(id, created, model, { [key]: tail }))}\n\n`);
+              res.write(`data: ${JSON.stringify(makeChunk(id, created, model, { content: raw }))}\n\n`);
             } else {
-              if (thinkingState.inThinking) buffer.reasoning += tail;
-              else buffer.content += tail;
+              buffer.content += raw;
             }
           }
-        }
-        if (stream) {
-          // Emit finish chunk
-          res.write(`data: ${JSON.stringify(makeChunk(id, created, model, {}, finishReason))}\n\n`);
-          // Emit a final usage chunk (OpenAI stream_options.include_usage compatible)
-          const promptTokens = Math.ceil(promptCharCount / 4);
-          const completionTokens = Math.ceil(completionChars / 4);
-          const usageChunk = {
-            id, object: 'chat.completion.chunk', created, model,
-            choices: [],
-            usage: {
-              prompt_tokens: promptTokens,
-              completion_tokens: completionTokens,
-              total_tokens: promptTokens + completionTokens,
-            },
-          };
-          res.write(`data: ${JSON.stringify(usageChunk)}\n\n`);
-        } else {
-          buffer.finish_reason = finishReason;
-          for (const [, tc] of activeToolCalls) {
-            buffer.tool_calls.push({
-              id: tc.id, type: 'function',
-              function: { name: tc.name, arguments: tc.arguments },
-            });
+        } else if (event.type === 'ToolCall') {
+          const idx = event.parallelToolIndex || 0;
+          if (event.id && event.name) {
+            activeToolCalls.set(idx, { id: event.id, name: event.name, arguments: '' });
+            if (stream) {
+              res.write(`data: ${JSON.stringify(makeChunk(id, created, model, {
+                tool_calls: [{ index: idx, id: event.id, type: 'function', function: { name: event.name, arguments: '' } }],
+              }))}\n\n`);
+            }
+          } else if (event.content) {
+            const tc = activeToolCalls.get(idx);
+            if (tc) tc.arguments += event.content;
+            completionChars += (event.content || '').length;
+            if (stream) {
+              res.write(`data: ${JSON.stringify(makeChunk(id, created, model, {
+                tool_calls: [{ index: idx, function: { arguments: event.content } }],
+              }))}\n\n`);
+            }
+          }
+        } else if (event.type === 'FinishMetadata') {
+          receivedFinish = true;
+          // Map JB finish reasons to OpenAI:
+          //   tool_call → tool_calls (model wants to call a tool)
+          //   length    → length    (output truncated due to max_tokens)
+          //   stop      → stop      (normal completion)
+          const finishReason = event.reason === 'tool_call' ? 'tool_calls'
+            : event.reason === 'length' ? 'length'
+            : 'stop';
+          if (finishReason === 'length') {
+            console.warn(`[WARN] Response truncated (finish_reason=length). Model=${model}. Consider increasing max_tokens.`);
+          }
+          // 末尾把 pending 的残留文本作为 content 输出（避免吞最后一个标签前的几个字符）
+          if (promptInject && thinkingState.pending) {
+            const tail = thinkingState.pending;
+            thinkingState.pending = '';
+            if (tail) {
+              completionChars += tail.length;
+              if (stream) {
+                const key = thinkingState.inThinking ? 'reasoning_content' : 'content';
+                res.write(`data: ${JSON.stringify(makeChunk(id, created, model, { [key]: tail }))}\n\n`);
+              } else {
+                if (thinkingState.inThinking) buffer.reasoning += tail;
+                else buffer.content += tail;
+              }
+            }
+          }
+          if (stream) {
+            // Emit finish chunk
+            res.write(`data: ${JSON.stringify(makeChunk(id, created, model, {}, finishReason))}\n\n`);
+            // Emit a final usage chunk (OpenAI stream_options.include_usage compatible)
+            const promptTokens = Math.ceil(promptCharCount / 4);
+            const completionTokens = Math.ceil(completionChars / 4);
+            const usageChunk = {
+              id, object: 'chat.completion.chunk', created, model,
+              choices: [],
+              usage: {
+                prompt_tokens: promptTokens,
+                completion_tokens: completionTokens,
+                total_tokens: promptTokens + completionTokens,
+              },
+            };
+            res.write(`data: ${JSON.stringify(usageChunk)}\n\n`);
+          } else {
+            buffer.finish_reason = finishReason;
+            for (const [, tc] of activeToolCalls) {
+              buffer.tool_calls.push({
+                id: tc.id, type: 'function',
+                function: { name: tc.name, arguments: tc.arguments },
+              });
+            }
           }
         }
       }
     }
+  } catch (streamErr) {
+    // Stream was terminated mid-flight (e.g. network reset, upstream close, AbortError).
+    // Log and fall through to the !receivedFinish handler below.
+    console.error(`[ERROR] OpenAI stream read error: ${streamErr.message}. Model=${model}.`);
   }
 
   // Detect stream interruption: if we never received FinishMetadata, the stream
